@@ -11,14 +11,15 @@ from tensorflow.keras import backend as K
 from tensorflow.keras.callbacks import Callback
 import wandb
 from wandb.keras import WandbCallback
+import pdb
 
 run = wandb.init(project='superres')
 config = run.config
 
 config.num_epochs = 50
 config.batch_size = 32
-config.input_height = 32
-config.input_width = 32
+config.input_height = 256
+config.input_width = 256
 config.output_height = 256
 config.output_width = 256
 
@@ -37,26 +38,28 @@ config.val_steps_per_epoch = len(
     glob.glob(val_dir + "/*-in.jpg")) // config.batch_size
 
 
-def image_generator(batch_size, img_dir):
+def image_generator_bicubic(batch_size, img_dir):
     """A generator that returns small images and large images.  DO NOT ALTER the validation set"""
     input_filenames = glob.glob(img_dir + "/*-in.jpg")
     counter = 0
     while True:
-        small_images = np.zeros(
-            (batch_size, config.input_width, config.input_height, 3))
-        large_images = np.zeros(
-            (batch_size, config.output_width, config.output_height, 3))
+        intrp_images = np.zeros((batch_size, config.output_width, config.output_height, 3))
+        large_images = np.zeros((batch_size, config.output_width, config.output_height, 3))
         random.shuffle(input_filenames)
         if counter+batch_size >= len(input_filenames):
             counter = 0
         for i in range(batch_size):
             img = input_filenames[counter + i]
-            small_images[i] = np.array(Image.open(img)) / 255.0
-            large_images[i] = np.array(
-                Image.open(img.replace("-in.jpg", "-out.jpg"))) / 255.0
-        yield (small_images, large_images)
+            small_img = Image.open(img).convert("RGB")
+            #pdb.set_trace()
+            new_img = small_img.resize((config.output_width,config.output_height),Image.BICUBIC)
+            #pdb.set_trace()
+            intrp_images[i] = np.array(new_img) / 255.0
+            large_images[i] = np.array(Image.open(img.replace("-in.jpg", "-out.jpg"))) / 255.0
+        yield (intrp_images, large_images)
         counter += batch_size
 
+      
 
 def perceptual_distance(y_true, y_pred):
     """Calculate perceptual distance, DO NOT ALTER"""
@@ -78,15 +81,15 @@ def peak_snr (y_true, y_pred):
     return (mse/(c_max*c_max))
 
 def inception_block(ip):
-    conv1x1_out = layers.Conv2DTranspose( 3, (1,1), strides=(2,2), padding='same', output_padding=(1,1), activation="relu")(ip)
-    conv3x3_out = layers.Conv2DTranspose(10, (3,3), strides=(2,2), padding='same', output_padding=(1,1),activation="relu")(ip)
-    conv5x5_out = layers.Conv2DTranspose(10, (5,5), strides=(2,2), padding='same', output_padding=(1,1),activation="relu")(ip)
-    conv7x7_out = layers.Conv2DTranspose(10, (7,7), strides=(2,2), padding='same', output_padding=(1,1), activation="relu")(ip)
+    conv1x1_out = layers.Conv2D( 3, (1,1), padding='same', activation="relu")(ip)
+    conv3x3_out = layers.Conv2D(10, (3,3), padding='same', activation="relu")(ip)
+    conv5x5_out = layers.Conv2D(10, (5,5), padding='same', activation="relu")(ip)
+    conv7x7_out = layers.Conv2D(10, (7,7), padding='same', activation="relu")(ip)
     concat_out  = layers.Concatenate()([conv1x1_out, conv3x3_out, conv5x5_out, conv7x7_out])
     #ups2x2_out  = layers.UpSampling2D((2,2))(concat_out)
     return concat_out
 
-val_generator = image_generator(config.batch_size, val_dir)
+val_generator = image_generator_bicubic(config.batch_size, val_dir)
 in_sample_images, out_sample_images = next(val_generator)
 
 
@@ -103,21 +106,9 @@ class ImageLogger(Callback):
 
 
 
-inp = layers.Input(shape=(config.input_width, config.input_height, 3))
-
+inp = layers.Input(shape=(config.output_width, config.output_height, 3))
 inc1_out = inception_block (inp)
-ups1_out = layers.UpSampling2D((2,2))(inp)
-lev1_out = layers.Concatenate()([inc1_out, ups1_out])
-
-inc2_out = inception_block (lev1_out)
-ups2_out = layers.UpSampling2D((2,2))(ups1_out)
-lev2_out = layers.Concatenate()([inc2_out, ups2_out])
-
-inc3_out = inception_block (lev2_out)
-ups3_out = layers.UpSampling2D((2,2))(ups2_out)
-lev3_out = layers.Concatenate()([inc3_out, ups3_out])
-
-final_op = layers.Conv2D(3, (3,3), activation='relu', padding='same')(lev3_out)
+final_op = layers.Conv2D(3, (3,3), activation='relu', padding='same')(inc1_out)
 model = Model(inp, final_op)
 
 model.summary()
@@ -127,7 +118,7 @@ adam_opt = optimizers.Adam(lr=0.0001, beta_1=0.9, beta_2=0.999, epsilon=1e-8, de
 model.compile(optimizer='adam', loss=[perceptual_distance],
               metrics=[perceptual_distance])
 
-model.fit_generator(image_generator(config.batch_size, train_dir),
+model.fit_generator(image_generator_bicubic(config.batch_size, train_dir),
                     steps_per_epoch=config.steps_per_epoch,
                     epochs=config.num_epochs, callbacks=[
                         ImageLogger(), WandbCallback()],
